@@ -142,17 +142,31 @@ is_branch_allowed() {
 show_available_branches() {
     if [ "$ENABLE_BRANCH_WHITELIST" = "true" ]; then
         log_info "允许合并的分支："
+        local index=1
+        AVAILABLE_BRANCHES_FOR_SELECTION=()
         for branch in "${ALLOWED_BRANCHES[@]}"; do
             # 检查分支是否实际存在
             if git show-ref --quiet --heads "$branch"; then
-                echo -e "  ${GREEN}✓${NC} $branch"
+                echo -e "  ${GREEN}$index)${NC} $branch"
+                AVAILABLE_BRANCHES_FOR_SELECTION+=("$branch")
+                ((index++))
             else
                 echo -e "  ${YELLOW}⚠${NC} $branch (不存在)"
             fi
         done
     else
         log_info "可用的本地分支："
-        git branch | grep -v "^*" | grep -v "$TARGET_BRANCH" | sed 's/^/  /'
+        local index=1
+        AVAILABLE_BRANCHES_FOR_SELECTION=()
+        # 获取所有分支但排除当前分支
+        while IFS= read -r branch; do
+            branch=$(echo "$branch" | sed 's/^[[:space:]]*//')  # 去掉前导空格
+            if [ "$branch" != "$TARGET_BRANCH" ]; then
+                echo -e "  ${GREEN}$index)${NC} $branch"
+                AVAILABLE_BRANCHES_FOR_SELECTION+=("$branch")
+                ((index++))
+            fi
+        done < <(git branch | grep -v "^*" | grep -v "$TARGET_BRANCH")
     fi
 }
 
@@ -163,33 +177,49 @@ get_source_branch() {
     echo
     
     while true; do
-        read -p "请输入要合并到 $TARGET_BRANCH 的分支名: " source_branch
+        read -p "请输入要合并到 $TARGET_BRANCH 的分支名或序号: " user_input
         
-        if [ -z "$source_branch" ]; then
-            log_warning "分支名不能为空"
+        if [ -z "$user_input" ]; then
+            log_warning "输入不能为空"
             continue
         fi
         
-        if [ "$source_branch" = "$TARGET_BRANCH" ]; then
-            log_warning "不能合并分支到自己"
-            continue
-        fi
-        
-        if ! git show-ref --quiet --heads "$source_branch"; then
-            log_error "分支 '$source_branch' 不存在"
-            continue
-        fi
-        
-        # 检查分支是否在允许列表中
-        if ! is_branch_allowed "$source_branch"; then
-            log_error "分支 '$source_branch' 不在允许合并的分支列表中"
-            if [ "$ENABLE_BRANCH_WHITELIST" = "true" ]; then
-                echo "允许的分支："
-                for allowed_branch in "${ALLOWED_BRANCHES[@]}"; do
-                    echo "  - $allowed_branch"
-                done
+        # 检查输入是否为数字
+        if [[ "$user_input" =~ ^[0-9]+$ ]]; then
+            # 数字输入处理
+            local branch_index=$((user_input - 1))
+            
+            if [ $branch_index -lt 0 ] || [ $branch_index -ge ${#AVAILABLE_BRANCHES_FOR_SELECTION[@]} ]; then
+                log_error "无效的序号 '$user_input'，请输入 1 到 ${#AVAILABLE_BRANCHES_FOR_SELECTION[@]} 之间的数字"
+                continue
             fi
-            continue
+            
+            source_branch="${AVAILABLE_BRANCHES_FOR_SELECTION[$branch_index]}"
+        else
+            # 分支名输入处理
+            source_branch="$user_input"
+            
+            if [ "$source_branch" = "$TARGET_BRANCH" ]; then
+                log_warning "不能合并分支到自己"
+                continue
+            fi
+            
+            if ! git show-ref --quiet --heads "$source_branch"; then
+                log_error "分支 '$source_branch' 不存在"
+                continue
+            fi
+            
+            # 检查分支是否在允许列表中
+            if ! is_branch_allowed "$source_branch"; then
+                log_error "分支 '$source_branch' 不在允许合并的分支列表中"
+                if [ "$ENABLE_BRANCH_WHITELIST" = "true" ]; then
+                    echo "允许的分支："
+                    for i in "${!AVAILABLE_BRANCHES_FOR_SELECTION[@]}"; do
+                        echo "  $((i+1)). ${AVAILABLE_BRANCHES_FOR_SELECTION[$i]}"
+                    done
+                fi
+                continue
+            fi
         fi
         
         break
