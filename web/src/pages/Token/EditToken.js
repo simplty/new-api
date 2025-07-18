@@ -48,11 +48,11 @@ const EditToken = (props) => {
     name: '',
     remain_quota: 500000,
     expired_time: -1,
-    unlimited_quota: false,
+    unlimited_quota: true,
     model_limits_enabled: false,
     model_limits: [],
     allow_ips: '',
-    group: '',
+    group: 'auto',
     tokenCount: 1,
   });
 
