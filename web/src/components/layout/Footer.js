@@ -81,12 +81,6 @@ const FooterBar = () => {
           <Typography.Text className="text-sm !text-semi-color-text-1">© {currentYear} {systemName}. {t('版权所有')}</Typography.Text>
         </div>
 
-        <div className="text-sm">
-          <span className="!text-semi-color-text-1">{t('设计与开发由')} </span>
-          <a href="https://github.com/QuantumNous/new-api" target="_blank" rel="noopener noreferrer" className="!text-semi-color-primary font-medium">New API</a>
-          <span className="!text-semi-color-text-1"> & </span>
-          <a href="https://github.com/songquanpeng/one-api" target="_blank" rel="noopener noreferrer" className="!text-semi-color-primary font-medium">One API</a>
-        </div>
       </div>
     </footer>
   ), [logo, systemName, t, currentYear, isDemoSiteMode]);
