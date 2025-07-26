@@ -40,11 +40,8 @@ const (
 	RelayModeSunoFetchByID
 	RelayModeSunoSubmit
 
-	RelayModeKlingFetchByID
-	RelayModeKlingSubmit
-
-	RelayModeJimengFetchByID
-	RelayModeJimengSubmit
+	RelayModeVideoFetchByID
+	RelayModeVideoSubmit
 
 	RelayModeRerank
 
@@ -53,6 +50,8 @@ const (
 	RelayModeRealtime
 
 	RelayModeGemini
+
+	RelayModeCustomPass
 )
 
 func Path2RelayMode(path string) int {
@@ -142,26 +141,6 @@ func Path2RelaySuno(method, path string) int {
 		relayMode = RelayModeSunoFetchByID
 	} else if strings.Contains(path, "/submit/") {
 		relayMode = RelayModeSunoSubmit
-	}
-	return relayMode
-}
-
-func Path2RelayKling(method, path string) int {
-	relayMode := RelayModeUnknown
-	if method == http.MethodPost && strings.HasSuffix(path, "/video/generations") {
-		relayMode = RelayModeKlingSubmit
-	} else if method == http.MethodGet && strings.Contains(path, "/video/generations/") {
-		relayMode = RelayModeKlingFetchByID
-	}
-	return relayMode
-}
-
-func Path2RelayJimeng(method, path string) int {
-	relayMode := RelayModeUnknown
-	if method == http.MethodPost && strings.HasSuffix(path, "/video/generations") {
-		relayMode = RelayModeJimengSubmit
-	} else if method == http.MethodGet && strings.Contains(path, "/video/generations/") {
-		relayMode = RelayModeJimengFetchByID
 	}
 	return relayMode
 }
