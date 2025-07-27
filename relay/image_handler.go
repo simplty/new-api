@@ -16,6 +16,7 @@ import (
 	"one-api/relay/helper"
 	"one-api/service"
 	"one-api/setting"
+	"one-api/setting/model_setting"
 	"one-api/types"
 	"strings"
 
@@ -145,22 +146,25 @@ func ImageHelper(c *gin.Context) (newAPIError *types.NewAPIError) {
 
 	} else {
 		sizeRatio := 1.0
-		// Size
-		if imageRequest.Size == "256x256" {
-			sizeRatio = 0.4
-		} else if imageRequest.Size == "512x512" {
-			sizeRatio = 0.45
-		} else if imageRequest.Size == "1024x1024" {
-			sizeRatio = 1
-		} else if imageRequest.Size == "1024x1792" || imageRequest.Size == "1792x1024" {
-			sizeRatio = 2
-		}
-
 		qualityRatio := 1.0
-		if imageRequest.Model == "dall-e-3" && imageRequest.Quality == "hd" {
-			qualityRatio = 2.0
-			if imageRequest.Size == "1024x1792" || imageRequest.Size == "1792x1024" {
-				qualityRatio = 1.5
+
+		if strings.HasPrefix(imageRequest.Model, "dall-e") {
+			// Size
+			if imageRequest.Size == "256x256" {
+				sizeRatio = 0.4
+			} else if imageRequest.Size == "512x512" {
+				sizeRatio = 0.45
+			} else if imageRequest.Size == "1024x1024" {
+				sizeRatio = 1
+			} else if imageRequest.Size == "1024x1792" || imageRequest.Size == "1792x1024" {
+				sizeRatio = 2
+			}
+
+			if imageRequest.Model == "dall-e-3" && imageRequest.Quality == "hd" {
+				qualityRatio = 2.0
+				if imageRequest.Size == "1024x1792" || imageRequest.Size == "1792x1024" {
+					qualityRatio = 1.5
+				}
 			}
 		}
 
@@ -184,29 +188,50 @@ func ImageHelper(c *gin.Context) (newAPIError *types.NewAPIError) {
 
 	var requestBody io.Reader
 
-	convertedRequest, err := adaptor.ConvertImageRequest(c, relayInfo, *imageRequest)
-	if err != nil {
-		return types.NewError(err, types.ErrorCodeConvertRequestFailed)
-	}
-	if relayInfo.RelayMode == relayconstant.RelayModeImagesEdits {
-		requestBody = convertedRequest.(io.Reader)
+	if model_setting.GetGlobalSettings().PassThroughRequestEnabled || relayInfo.ChannelSetting.PassThroughBodyEnabled {
+		body, err := common.GetRequestBody(c)
+		if err != nil {
+			return types.NewErrorWithStatusCode(err, types.ErrorCodeReadRequestBodyFailed, http.StatusBadRequest)
+		}
+		requestBody = bytes.NewBuffer(body)
 	} else {
-		jsonData, err := json.Marshal(convertedRequest)
+		convertedRequest, err := adaptor.ConvertImageRequest(c, relayInfo, *imageRequest)
 		if err != nil {
 			return types.NewError(err, types.ErrorCodeConvertRequestFailed)
 		}
-		requestBody = bytes.NewBuffer(jsonData)
-	}
+		if relayInfo.RelayMode == relayconstant.RelayModeImagesEdits {
+			requestBody = convertedRequest.(io.Reader)
+		} else {
+			jsonData, err := json.Marshal(convertedRequest)
+			if err != nil {
+				return types.NewError(err, types.ErrorCodeConvertRequestFailed)
+			}
 
-	if common.DebugEnabled {
-		println(fmt.Sprintf("image request body: %s", requestBody))
+			// apply param override
+			if len(relayInfo.ParamOverride) > 0 {
+				reqMap := make(map[string]interface{})
+				_ = common.Unmarshal(jsonData, &reqMap)
+				for key, value := range relayInfo.ParamOverride {
+					reqMap[key] = value
+				}
+				jsonData, err = common.Marshal(reqMap)
+				if err != nil {
+					return types.NewError(err, types.ErrorCodeChannelParamOverrideInvalid)
+				}
+			}
+
+			if common.DebugEnabled {
+				println(fmt.Sprintf("image request body: %s", string(jsonData)))
+			}
+			requestBody = bytes.NewBuffer(jsonData)
+		}
 	}
 
 	statusCodeMappingStr := c.GetString("status_code_mapping")
 
 	resp, err := adaptor.DoRequest(c, relayInfo, requestBody)
 	if err != nil {
-		return types.NewError(err, types.ErrorCodeDoRequestFailed)
+		return types.NewOpenAIError(err, types.ErrorCodeDoRequestFailed, http.StatusInternalServerError)
 	}
 	var httpResp *http.Response
 	if resp != nil {
