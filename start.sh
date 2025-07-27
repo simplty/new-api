@@ -15,15 +15,6 @@ CURRENT_SCRIPT="$0"
 # 4. 请保持CHANGELOG的时间顺序（最新的在上面）
 # ============================================
 
-# ============================================
-# 🤖 重要提醒：AI/LLM 修改此脚本时的要求
-# ============================================
-# 1. 必须在下方CHANGELOG部分添加今天的修改记录
-# 2. 格式：# YYYY-MM-DD: 
-# 3. 格式：# - 具体修改内容描述  
-# 4. 请保持CHANGELOG的时间顺序（最新的在上面）
-# ============================================
-
 # =================
 # CHANGELOG
 # =================
@@ -32,12 +23,6 @@ CURRENT_SCRIPT="$0"
 # 当您（AI/LLM）修改此脚本时，请务必在CHANGELOG中添加今天日期的修改记录
 # 格式：# YYYY-MM-DD: 
 # 格式：# - 具体修改内容描述
-# 
-# 2025-07-25:
-# - 新增 -m 参数用于启动 mock server
-# - 添加 mock server 端口冲突检测和处理功能
-# - 为 mock server 提供端口冲突时的用户选择选项（结束进程、更换端口、退出）
-# - 实现 start_mock_server 函数，支持启动测试目录中的 mock_server.py
 # 
 # 2025-07-20:
 # - 新增 --clean 参数，用于清除本地编译的文件以防止缓存问题
@@ -71,14 +56,12 @@ NC='\033[0m' # No Color
 
 # 默认端口配置
 DEFAULT_PORT=3000
-MOCK_SERVER_PORT=8080
 
 # 环境变量设置
 setup_environment() {
     print_message $BLUE "设置环境变量..."
     
     # 设置SQLite数据库文件路径
-    # export SQLITE_PATH="../one-api.db"
     # export SQLITE_PATH="../one-api.db"
     
     # 设置其他常用环境变量
@@ -90,138 +73,8 @@ setup_environment() {
         export PORT=$DEFAULT_PORT
     fi
     
-    # 设置端口（如果没有设置PORT环境变量）
-    if [ -z "$PORT" ]; then
-        export PORT=$DEFAULT_PORT
-    fi
-    
     print_message $GREEN "环境变量设置完成"
     print_message $YELLOW "SQLite数据库文件路径: $SQLITE_PATH"
-    print_message $YELLOW "服务端口: $PORT"
-}
-
-# 检查端口是否被占用
-check_port() {
-    local port=$1
-    if lsof -Pi :$port -sTCP:LISTEN -t >/dev/null 2>&1; then
-        return 0  # 端口被占用
-    else
-        return 1  # 端口可用
-    fi
-}
-
-# 获取占用端口的进程信息
-get_port_process_info() {
-    local port=$1
-    local pid=$(lsof -Pi :$port -sTCP:LISTEN -t 2>/dev/null | head -1)
-    if [ -n "$pid" ]; then
-        local process_name=$(ps -p $pid -o comm= 2>/dev/null)
-        local process_args=$(ps -p $pid -o args= 2>/dev/null)
-        echo "PID: $pid, 进程名: $process_name"
-        echo "完整命令: $process_args"
-    fi
-}
-
-# 处理端口冲突
-handle_port_conflict() {
-    local port=$1
-    print_message $RED "端口 $port 已被占用！"
-    print_message $YELLOW "占用端口的进程信息："
-    get_port_process_info $port
-    echo ""
-    
-    print_message $YELLOW "请选择处理方式："
-    echo "1) 结束占用端口的进程"
-    echo "2) 使用其他端口"
-    echo "3) 退出"
-    echo -n "请输入选择 (1-3): "
-    
-    read -r choice
-    case $choice in
-        1)
-            kill_port_process $port
-            ;;
-        2)
-            choose_alternative_port
-            ;;
-        3)
-            print_message $YELLOW "退出启动"
-            exit 0
-            ;;
-        *)
-            print_message $RED "无效选择，退出启动"
-            exit 1
-            ;;
-    esac
-}
-
-# 结束占用端口的进程
-kill_port_process() {
-    local port=$1
-    local pid=$(lsof -Pi :$port -sTCP:LISTEN -t 2>/dev/null | head -1)
-    
-    if [ -n "$pid" ]; then
-        print_message $YELLOW "正在结束进程 PID: $pid..."
-        if kill $pid 2>/dev/null; then
-            sleep 2
-            # 检查进程是否确实被终止
-            if check_port $port; then
-                print_message $YELLOW "进程未完全结束，尝试强制终止..."
-                kill -9 $pid 2>/dev/null
-                sleep 1
-            fi
-            
-            if check_port $port; then
-                print_message $RED "无法结束占用端口的进程，请手动处理"
-                exit 1
-            else
-                print_message $GREEN "成功结束占用端口的进程"
-            fi
-        else
-            print_message $RED "无法结束进程，可能需要管理员权限"
-            exit 1
-        fi
-    else
-        print_message $YELLOW "未找到占用端口的进程"
-    fi
-}
-
-# 选择其他端口
-choose_alternative_port() {
-    print_message $BLUE "正在寻找可用端口..."
-    
-    # 从当前端口开始，寻找下一个可用端口
-    local new_port=$((PORT + 1))
-    local max_attempts=100
-    local attempts=0
-    
-    while [ $attempts -lt $max_attempts ]; do
-        if ! check_port $new_port; then
-            print_message $GREEN "找到可用端口: $new_port"
-            export PORT=$new_port
-            return 0
-        fi
-        new_port=$((new_port + 1))
-        attempts=$((attempts + 1))
-    done
-    
-    # 如果没找到可用端口，让用户手动输入
-    print_message $YELLOW "未找到可用端口，请手动输入端口号："
-    echo -n "端口号: "
-    read -r manual_port
-    
-    if [[ "$manual_port" =~ ^[0-9]+$ ]] && [ "$manual_port" -ge 1024 ] && [ "$manual_port" -le 65535 ]; then
-        if check_port $manual_port; then
-            print_message $RED "端口 $manual_port 也被占用"
-            exit 1
-        else
-            export PORT=$manual_port
-            print_message $GREEN "将使用端口: $PORT"
-        fi
-    else
-        print_message $RED "无效的端口号"
-        exit 1
-    fi
     print_message $YELLOW "服务端口: $PORT"
 }
 
@@ -366,7 +219,6 @@ show_help() {
     echo "  -b, --build     编译前后端后启动"
     echo "  -f, --frontend  编译前端后启动"
     echo "  -bk, --backend  编译后端后启动"
-    echo "  -m, --mock      启动 mock server (用于测试)"
     echo "  --clean         清除本地编译文件 (new-api 二进制文件和 web/dist 目录)"
     echo "  --push          推送当前脚本到基准目录"
     echo "  --pull          从基准目录拉取脚本到当前目录"
@@ -379,7 +231,6 @@ show_help() {
     echo "  $0 -b           # 编译前后端后启动"
     echo "  $0 --frontend   # 编译前端后启动"
     echo "  $0 -bk          # 编译后端后启动"
-    echo "  $0 -m           # 启动 mock server"
     echo "  $0 --clean      # 清除编译文件"
     echo "  $0 --push       # 推送脚本到基准目录"
     echo "  $0 --pull       # 从基准目录拉取脚本"
@@ -428,10 +279,6 @@ check_update() {
 # 推送脚本到基准目录
 push_script() {
     print_message $BLUE "推送脚本到基准目录..."
-
-# 推送脚本到基准目录
-push_script() {
-    print_message $BLUE "推送脚本到基准目录..."
     
     # 确保基准目录存在
     if [ ! -d "$BASE_DIR" ]; then
@@ -445,79 +292,6 @@ push_script() {
     cp "$CURRENT_SCRIPT" "$base_script"
     chmod +x "$base_script"
     
-    print_message $GREEN "脚本已推送到基准目录: $base_script"
-}
-
-# 拉取基准目录的脚本到当前目录
-pull_script() {
-    print_message $BLUE "从基准目录拉取脚本..."
-    
-    local base_script="${BASE_DIR}/${SCRIPT_NAME}"
-    
-    # 检查基准目录是否存在
-    if [ ! -d "$BASE_DIR" ]; then
-        print_message $RED "基准目录不存在: $BASE_DIR"
-        return 1
-    fi
-    
-    # 检查基准脚本是否存在
-    if [ ! -f "$base_script" ]; then
-        print_message $RED "基准脚本不存在: $base_script"
-        return 1
-    fi
-    
-    # 备份当前脚本
-    local backup_script="${CURRENT_SCRIPT}.backup.$(date +%Y%m%d_%H%M%S)"
-    cp "$CURRENT_SCRIPT" "$backup_script"
-    print_message $YELLOW "当前脚本已备份为: $backup_script"
-    
-    # 复制基准脚本到当前目录
-    cp "$base_script" "$CURRENT_SCRIPT"
-    chmod +x "$CURRENT_SCRIPT"
-    
-    print_message $GREEN "脚本已从基准目录拉取: $base_script"
-    print_message $YELLOW "请重新运行脚本以使用新版本"
-}
-
-# 清除编译文件
-clean_compiled_files() {
-    print_message $BLUE "清除本地编译文件..."
-    
-    local cleaned=false
-    
-    # 清除后端编译的二进制文件
-    if [ -f "./new-api" ]; then
-        print_message $YELLOW "删除 new-api 二进制文件..."
-        rm -f ./new-api
-        cleaned=true
-    fi
-    
-    # 清除前端编译的 dist 目录
-    if [ -d "./web/dist" ]; then
-        print_message $YELLOW "删除 web/dist 目录..."
-        rm -rf ./web/dist
-        cleaned=true
-    fi
-    
-    # 清除 Go 的构建缓存（可选）
-    if command -v go >/dev/null 2>&1; then
-        print_message $YELLOW "清除 Go 构建缓存..."
-        go clean -cache
-        cleaned=true
-    fi
-    
-    # 清除 node_modules/.cache（如果存在）
-    if [ -d "./web/node_modules/.cache" ]; then
-        print_message $YELLOW "删除 web/node_modules/.cache 目录..."
-        rm -rf ./web/node_modules/.cache
-        cleaned=true
-    fi
-    
-    if [ "$cleaned" = true ]; then
-        print_message $GREEN "编译文件清除完成"
-    else
-        print_message $YELLOW "没有找到需要清除的编译文件"
-    fi
     print_message $GREEN "脚本已推送到基准目录: $base_script"
 }
 
@@ -672,13 +446,6 @@ start_service() {
     
     print_message $GREEN "准备在端口 $PORT 启动服务..."
     
-    # 检查端口冲突
-    if check_port $PORT; then
-        handle_port_conflict $PORT
-    fi
-    
-    print_message $GREEN "准备在端口 $PORT 启动服务..."
-    
     if [ -f "./new-api" ]; then
         ./new-api
     elif [ -f "main.go" ]; then
@@ -731,132 +498,6 @@ direct_start() {
     start_service
 }
 
-# 处理 mock server 端口冲突
-handle_mock_port_conflict() {
-    local port=$1
-    print_message $RED "Mock server 端口 $port 已被占用！"
-    print_message $YELLOW "占用端口的进程信息："
-    get_port_process_info $port
-    echo ""
-    
-    print_message $YELLOW "请选择处理方式："
-    echo "1) 结束占用端口的进程"
-    echo "2) 使用其他端口启动 mock server"
-    echo "3) 退出"
-    echo -n "请输入选择 (1-3): "
-    
-    read -r choice
-    case $choice in
-        1)
-            kill_port_process $port
-            ;;
-        2)
-            choose_mock_alternative_port
-            ;;
-        3)
-            print_message $YELLOW "退出启动"
-            exit 0
-            ;;
-        *)
-            print_message $RED "无效选择，退出启动"
-            exit 1
-            ;;
-    esac
-}
-
-# 选择 mock server 的其他端口
-choose_mock_alternative_port() {
-    print_message $BLUE "正在寻找可用端口..."
-    
-    # 从当前端口开始，寻找下一个可用端口
-    local new_port=$((MOCK_SERVER_PORT + 1))
-    local max_attempts=100
-    local attempts=0
-    
-    while [ $attempts -lt $max_attempts ]; do
-        if ! check_port $new_port; then
-            print_message $GREEN "找到可用端口: $new_port"
-            export MOCK_SERVER_PORT=$new_port
-            return 0
-        fi
-        new_port=$((new_port + 1))
-        attempts=$((attempts + 1))
-    done
-    
-    # 如果没找到可用端口，让用户手动输入
-    print_message $YELLOW "未找到可用端口，请手动输入端口号："
-    echo -n "端口号: "
-    read -r manual_port
-    
-    if [[ "$manual_port" =~ ^[0-9]+$ ]] && [ "$manual_port" -ge 1024 ] && [ "$manual_port" -le 65535 ]; then
-        if check_port $manual_port; then
-            print_message $RED "端口 $manual_port 也被占用"
-            exit 1
-        else
-            export MOCK_SERVER_PORT=$manual_port
-            print_message $GREEN "将使用端口: $MOCK_SERVER_PORT"
-        fi
-    else
-        print_message $RED "无效的端口号"
-        exit 1
-    fi
-}
-
-# 启动 mock server
-start_mock_server() {
-    print_message $BLUE "启动 Mock Server..."
-    
-    # 检查 test 目录是否存在
-    if [ ! -d "test" ]; then
-        print_message $RED "未找到 test 目录"
-        return 1
-    fi
-    
-    # 检查 mock_server.py 是否存在
-    if [ ! -f "test/mock_server.py" ]; then
-        print_message $RED "未找到 test/mock_server.py 文件"
-        return 1
-    fi
-    
-    # 检查端口冲突
-    if check_port $MOCK_SERVER_PORT; then
-        handle_mock_port_conflict $MOCK_SERVER_PORT
-    fi
-    
-    print_message $GREEN "准备在端口 $MOCK_SERVER_PORT 启动 Mock Server..."
-    
-    # 进入 test 目录
-    cd test
-    
-    # 检查 uv 是否安装
-    if ! command -v uv &> /dev/null; then
-        print_message $YELLOW "uv 未安装，尝试使用 python 直接启动..."
-        
-        # 检查 python 是否可用
-        if ! command -v python &> /dev/null 2>&1; then
-            print_message $RED "python 未找到，请先安装 Python"
-            cd ..
-            return 1
-        fi
-        
-        # 使用 python 直接启动
-        print_message $GREEN "🌐 Mock Server 启动在 http://localhost:$MOCK_SERVER_PORT"
-        print_message $GREEN "📚 API 文档地址: http://localhost:$MOCK_SERVER_PORT/docs"
-        print_message $GREEN "🔍 健康检查: http://localhost:$MOCK_SERVER_PORT/health"
-        print_message $YELLOW "按 Ctrl+C 停止服务器"
-        MOCK_SERVER_PORT=$MOCK_SERVER_PORT python mock_server.py
-    else
-        # 使用 uv 启动
-        print_message $GREEN "🌐 Mock Server 启动在 http://localhost:$MOCK_SERVER_PORT"
-        print_message $GREEN "📚 API 文档地址: http://localhost:$MOCK_SERVER_PORT/docs"
-        print_message $GREEN "🔍 健康检查: http://localhost:$MOCK_SERVER_PORT/health"
-        print_message $YELLOW "按 Ctrl+C 停止服务器"
-        MOCK_SERVER_PORT=$MOCK_SERVER_PORT uv run --no-project python mock_server.py
-    fi
-    
-    cd ..
-}
-
 # 主函数
 main() {
     # 首先检查更新 (已禁用以避免覆盖本地修改)
@@ -876,9 +517,6 @@ main() {
             ;;
         -bk|--backend)
             backend_and_start
-            ;;
-        -m|--mock)
-            start_mock_server
             ;;
         --clean)
             clean_compiled_files
@@ -906,12 +544,6 @@ main() {
 
 # 运行主函数
 main "$@"
-
-# ============================================
-# 🤖 AI/LLM 修改提醒：
-# 如果您修改了此脚本，请确认已在顶部CHANGELOG中
-# 添加了今天日期的修改记录！
-# ============================================
 
 # ============================================
 # 🤖 AI/LLM 修改提醒：
