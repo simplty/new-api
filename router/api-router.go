@@ -1,12 +1,104 @@
 package router
 
 import (
+	"net/http"
+	"os"
+	"strconv"
+	"strings"
+	"time"
 	"one-api/controller"
 	"one-api/middleware"
 
 	"github.com/gin-contrib/gzip"
 	"github.com/gin-gonic/gin"
 )
+
+// adminTokenSearchRateLimitMiddleware 为 /api/admin/token/search 提供自定义的限流和IP白名单功能
+func adminTokenSearchRateLimitMiddleware() gin.HandlerFunc {
+	// 读取环境变量
+	ipWhitelistStr := os.Getenv("ADMIN_TOKEN_SEARCH_IP_WHITELIST")
+	
+	// 解析IP白名单
+	var ipWhitelist []string
+	if ipWhitelistStr != "" {
+		ipWhitelist = strings.Split(ipWhitelistStr, ",")
+		for i := range ipWhitelist {
+			ipWhitelist[i] = strings.TrimSpace(ipWhitelist[i])
+		}
+	}
+	
+	// 使用简单的计数器来实现限流
+	requestCounts := make(map[string][]int64)
+	
+	return func(c *gin.Context) {
+		clientIP := c.ClientIP()
+		
+		// 检查IP白名单
+		isWhitelisted := false
+		for _, whiteIP := range ipWhitelist {
+			if whiteIP == clientIP {
+				isWhitelisted = true
+				break
+			}
+		}
+		
+		// 如果在白名单中，直接通过
+		if isWhitelisted {
+			c.Next()
+			return
+		}
+		
+		// 读取限流配置
+		rateLimitStr := os.Getenv("ADMIN_TOKEN_SEARCH_RATE_LIMIT")
+		rateDurationStr := os.Getenv("ADMIN_TOKEN_SEARCH_RATE_DURATION")
+		
+		// 解析限流参数，默认值：10次/60秒
+		rateLimit := 600
+		rateDuration := int64(60)
+		
+		if rateLimitStr != "" {
+			if limit, err := strconv.Atoi(rateLimitStr); err == nil {
+				rateLimit = limit
+			}
+		}
+		
+		if rateDurationStr != "" {
+			if duration, err := strconv.ParseInt(rateDurationStr, 10, 64); err == nil {
+				rateDuration = duration
+			}
+		}
+		
+		// 简单的内存限流实现
+		now := time.Now().Unix()
+		
+		// 获取该IP的请求记录
+		requests, exists := requestCounts[clientIP]
+		if !exists {
+			requests = []int64{}
+		}
+		
+		// 清理过期的请求记录
+		validRequests := []int64{}
+		for _, reqTime := range requests {
+			if now-reqTime < rateDuration {
+				validRequests = append(validRequests, reqTime)
+			}
+		}
+		
+		// 检查是否超过限制
+		if len(validRequests) >= rateLimit {
+			c.Status(http.StatusTooManyRequests)
+			c.Abort()
+			return
+		}
+		
+		// 记录新请求
+		validRequests = append(validRequests, now)
+		requestCounts[clientIP] = validRequests
+		
+		c.Next()
+	}
+}
 
 func SetApiRouter(router *gin.Engine) {
 	apiRouter := router.Group("/api")
@@ -135,7 +227,7 @@ func SetApiRouter(router *gin.Engine) {
 		adminTokenRoute := apiRouter.Group("/admin/token")
 		adminTokenRoute.Use(middleware.RootAuth())
 		{
-			adminTokenRoute.GET("/search", controller.AdminSearchTokenByKey)
+			adminTokenRoute.GET("/search", adminTokenSearchRateLimitMiddleware(), controller.AdminSearchTokenByKey)
 		}
 		redemptionRoute := apiRouter.Group("/redemption")
 		redemptionRoute.Use(middleware.AdminAuth())
