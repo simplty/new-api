@@ -5,6 +5,7 @@ import (
 	"one-api/common"
 	"one-api/model"
 	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 )
@@ -233,4 +234,41 @@ func DeleteTokenBatch(c *gin.Context) {
 		"message": "",
 		"data":    count,
 	})
+}
+
+func AdminSearchTokenByKey(c *gin.Context) {
+	tokenKey := c.Query("token")
+	if tokenKey == "" {
+		common.ApiErrorMsg(c, "token参数不能为空")
+		return
+	}
+
+	// 处理 sk- 前缀
+	if strings.HasPrefix(tokenKey, "sk-") {
+		tokenKey = strings.TrimPrefix(tokenKey, "sk-")
+	}
+
+	// 查询 token 信息
+	token, err := model.GetTokenByKey(tokenKey, true)
+	if err != nil {
+		common.ApiErrorMsg(c, "未找到该令牌: "+err.Error())
+		return
+	}
+
+	// 查询用户信息
+	user, err := model.GetUserById(token.UserId, false)
+	if err != nil {
+		common.ApiErrorMsg(c, "获取用户信息失败: "+err.Error())
+		return
+	}
+
+	// 清空 token key 字段
+	token.Clean()
+
+	// 返回响应
+	response := gin.H{
+		"token": token,
+		"user":  user,
+	}
+	common.ApiSuccess(c, response)
 }
