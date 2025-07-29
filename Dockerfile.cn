@@ -3,11 +3,13 @@ FROM swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/oven/bun:latest AS build
 WORKDIR /build
 COPY web/package.json .
 COPY web/bun.lock .
+
+RUN echo '[install]' > ~/.bunfig.toml && echo 'registry = "https://registry.npmmirror.com/"' >> ~/.bunfig.toml
+
 RUN bun install
 COPY ./web .
 COPY ./VERSION .
 
-RUN echo '[install]' > ~/.bunfig.toml && echo 'registry = "https://registry.npmmirror.com/"' >> ~/.bunfig.toml
 RUN DISABLE_ESLINT_PLUGIN='true' VITE_REACT_APP_VERSION=$(cat VERSION) bun run build
 
 FROM swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/library/golang:alpine AS builder2
