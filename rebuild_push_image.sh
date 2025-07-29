@@ -372,8 +372,35 @@ get_platform() {
     echo ""
 }
 
+# 检查 Docker 状态
+check_docker_status() {
+    log_info "检查 Docker 状态..."
+    
+    # 检查 Docker 是否已安装
+    if ! command -v docker &> /dev/null; then
+        log_error "Docker 未安装，请先安装 Docker"
+        exit 1
+    fi
+    
+    # 检查 Docker daemon 是否运行
+    if ! docker info &> /dev/null; then
+        log_error "Docker daemon 未运行"
+        echo ""
+        log_info "请尝试以下操作："
+        echo "  - macOS: 启动 Docker Desktop 应用"
+        echo "  - Linux: sudo systemctl start docker"
+        echo "  - 或者: sudo service docker start"
+        exit 1
+    fi
+    
+    log_success "Docker 运行正常"
+}
+
 # 清理旧镜像
 cleanup_old_images() {
+    # 先检查 Docker 状态
+    check_docker_status
+    
     log_info "清理旧镜像..."
     
     # 删除旧的镜像

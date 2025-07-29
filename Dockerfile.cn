@@ -1,4 +1,4 @@
-FROM oven/bun:latest AS builder
+FROM swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/oven/bun:latest AS builder
 
 WORKDIR /build
 COPY web/package.json .
@@ -6,31 +6,38 @@ COPY web/bun.lock .
 RUN bun install
 COPY ./web .
 COPY ./VERSION .
+
+RUN echo '[install]' > ~/.bunfig.toml && echo 'registry = "https://registry.npmmirror.com/"' >> ~/.bunfig.toml
 RUN DISABLE_ESLINT_PLUGIN='true' VITE_REACT_APP_VERSION=$(cat VERSION) bun run build
 
-FROM golang:alpine AS builder2
+FROM swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/library/golang:alpine AS builder2
 
 ENV GO111MODULE=on \
     CGO_ENABLED=0 \
-    GOOS=linux \
-    GOPROXY=https://goproxy.cn,direct
+    GOOS=linux
 
 WORKDIR /build
+
+RUN go env -w GOPROXY=https://mirrors.aliyun.com/goproxy/,direct
 
 ADD go.mod go.sum ./
 RUN go mod download
 
 COPY . .
 COPY --from=builder /build/dist ./web/dist
+
 RUN go build -ldflags "-s -w -X 'one-api/common.Version=$(cat VERSION)'" -o one-api
 
-FROM alpine
+FROM swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/alpine:latest
 
-# 使用中科大镜像源
-RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.ustc.edu.cn/g' /etc/apk/repositories \
-    && apk upgrade --no-cache \
+RUN sed -i 's#https\?://dl-cdn.alpinelinux.org/alpine#https://mirrors.tuna.tsinghua.edu.cn/alpine#g' /etc/apk/repositories
+
+
+RUN apk update && apk upgrade --no-cache \
     && apk add --no-cache ca-certificates tzdata ffmpeg \
     && update-ca-certificates
+
+
 
 COPY --from=builder2 /build/one-api /
 EXPOSE 3000
