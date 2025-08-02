@@ -11,6 +11,7 @@ import (
 	"one-api/model"
 	"one-api/relay/channel"
 	relaycommon "one-api/relay/common"
+	"one-api/relay/helper"
 	"one-api/service"
 	"one-api/types"
 	"strings"
@@ -128,6 +129,15 @@ func ExecuteTwoRequestFlow(c *gin.Context, params *TwoRequestParams) (*TwoReques
 			buildUpstreamURL(params.Channel.GetBaseURL(), params.ModelName), 
 			params.RequestBody, params.AuthService, params.HTTPClient)
 		if err != nil {
+			model.RecordConsumeLog(c, params.User.Id, model.RecordConsumeLogParams{
+				ChannelId:        params.Channel.Id,
+				PromptTokens:     0,
+				CompletionTokens: 0,
+				ModelName:        params.ModelName,
+				TokenName:        c.GetString("token_name"),
+				Quota:            0,
+				Content:          "请求失败: " + err.Error(),
+			})
 			return nil, err
 		}
 
@@ -140,36 +150,94 @@ func ExecuteTwoRequestFlow(c *gin.Context, params *TwoRequestParams) (*TwoReques
 		}, nil
 	}
 
-	// Step 1: Send precharge request to get usage estimation
+
+	// 定义返回结果变量                                                                     
+	var result *TwoRequestResult                                                            
+                                                                                     
+	// Step 1: 构建RelayInfo用于标准价格计算                                   
+	billingMode := params.BillingService.DetermineBillingMode(params.ModelName)             
+	
+	// 构建RelayInfo，让标准流程处理分组逻辑
+	relayInfo := &relaycommon.RelayInfo{
+		UserGroup: params.User.Group,
+		UsingGroup: params.User.Group, // 初始值，HandleGroupRatio会根据auto_group更新
+		OriginModelName: params.ModelName,
+	}
+
+	// 设置用户设置信息（如果需要的话）
+	if params.User != nil {
+		relayInfo.UserSetting = dto.UserSetting{
+			AcceptUnsetRatioModel: false, // 根据实际需求设置
+		}
+	}
+
+	// 先获取预扣费响应以获得token信息
 	common.SysLog(fmt.Sprintf("[CustomPass-TwoRequest-Debug] 模型%s需要计费，开始预扣费请求流程", params.ModelName))
 	prechargeResp, err := handlePrechargeRequest(c, params)
 	if err != nil {
 		common.SysError(fmt.Sprintf("[CustomPass-TwoRequest-Debug] 预扣费请求失败: %v", err))
+		model.RecordConsumeLog(c, params.User.Id, model.RecordConsumeLogParams{
+			ChannelId:        params.Channel.Id,
+			PromptTokens:     0,
+			CompletionTokens: 0,
+			ModelName:        params.ModelName,
+			TokenName:        c.GetString("token_name"),
+			Quota:            0,
+			Content:          "预扣费请求失败: " + err.Error(),
+		})
 		return nil, err
 	}
 
-	// Check if upstream returned precharge response
-	common.SysLog(fmt.Sprintf("[CustomPass-TwoRequest-Debug] 检查上游响应类型 - Type: %s, IsPrecharge: %t", 
-		prechargeResp.Type, prechargeResp.IsPrecharge()))
-
-	if prechargeResp.IsPrecharge() {
-		common.SysLog("[CustomPass-TwoRequest-Debug] 上游支持预扣费，将发起两次请求")
-		return executeTwoRequestMode(c, params, prechargeResp)
-	} else {
-		common.SysLog("[CustomPass-TwoRequest-Debug] 上游不支持预扣费，使用单次请求模式，基于估算用量预扣费")
-		return executeSingleRequestMode(c, params, prechargeResp)
+	if prechargeResp.Usage == nil {                               
+		return nil, &CustomPassError{                             
+			Code:    ErrCodeUpstreamError,                        
+			Message: "预扣费响应缺少usage信息",                   
+		}                                                         
 	}
-}
 
-// executeTwoRequestMode handles the case where upstream supports precharge
-func executeTwoRequestMode(c *gin.Context, params *TwoRequestParams, prechargeResp *UpstreamResponse) (*TwoRequestResult, error) {
-	// Upstream supports precharge, use the usage for precharge calculation
-	if prechargeResp.Usage == nil {
+	// 使用标准ModelPriceHelper进行价格计算
+	priceData, err := helper.ModelPriceHelper(c, relayInfo, 
+		prechargeResp.Usage.GetInputTokens(), 
+		prechargeResp.Usage.GetOutputTokens())
+	if err != nil {
+		common.SysError(fmt.Sprintf("[CustomPass-TwoRequest-Debug] ModelPriceHelper失败: %v", err))
 		return nil, &CustomPassError{
-			Code:    ErrCodeUpstreamError,
-			Message: "预扣费响应缺少usage信息",
+			Code:    ErrCodeSystemError,
+			Message: "价格计算失败",
+			Details: err.Error(),
 		}
 	}
+	
+	// 构建 BillingInfo
+	billingInfo := &model.BillingInfo{
+		GroupRatio:      priceData.GroupRatioInfo.GroupRatio,
+		UserGroupRatio:  priceData.GroupRatioInfo.GroupSpecialRatio,
+		ModelRatio:      priceData.ModelRatio,
+		CompletionRatio: priceData.CompletionRatio,
+		ModelPrice:      priceData.ModelPrice,
+		BillingMode:     billingModeToString(billingMode),
+		HasSpecialRatio: priceData.GroupRatioInfo.HasSpecialRatio,
+	}
+
+	// 打印计费信息 (使用标准ModelPriceHelper的结果)
+	common.SysLog(fmt.Sprintf("[CustomPass-TwoRequest-Debug] ===== 标准价格计算结果 ====="))
+	common.SysLog(fmt.Sprintf("[CustomPass-TwoRequest-Debug] 模型: %s", params.ModelName))
+	common.SysLog(fmt.Sprintf("[CustomPass-TwoRequest-Debug] 用户ID: %d, 用户组: %s", params.User.Id, params.User.Group))
+	common.SysLog(fmt.Sprintf("[CustomPass-TwoRequest-Debug] 使用分组: %s", relayInfo.UsingGroup))
+	common.SysLog(fmt.Sprintf("[CustomPass-TwoRequest-Debug] 计费模式: %s", billingInfo.BillingMode))
+	if priceData.UsePrice {
+		common.SysLog(fmt.Sprintf("[CustomPass-TwoRequest-Debug] 固定价格: %.6f", billingInfo.ModelPrice))
+	} else {
+		common.SysLog(fmt.Sprintf("[CustomPass-TwoRequest-Debug] 模型倍率: %.6f", billingInfo.ModelRatio))
+		common.SysLog(fmt.Sprintf("[CustomPass-TwoRequest-Debug] 补全倍率: %.6f", billingInfo.CompletionRatio))
+	}
+	common.SysLog(fmt.Sprintf("[CustomPass-TwoRequest-Debug] 组倍率: %.6f", billingInfo.GroupRatio))
+	common.SysLog(fmt.Sprintf("[CustomPass-TwoRequest-Debug] 用户特殊倍率: %.6f", billingInfo.UserGroupRatio))
+	common.SysLog(fmt.Sprintf("[CustomPass-TwoRequest-Debug] 是否使用特殊倍率: %t", billingInfo.HasSpecialRatio))
+	common.SysLog(fmt.Sprintf("[CustomPass-TwoRequest-Debug] 预消费配额: %d", priceData.ShouldPreConsumedQuota))
+	common.SysLog(fmt.Sprintf("[CustomPass-TwoRequest-Debug] ======================"))
+
+	// Step 3: 计算预扣费金额信息
 
 	// Log the usage from precharge response for debugging
 	common.SysLog(fmt.Sprintf("[CustomPass-Usage-Debug] ===== 预扣费响应的Usage (executeTwoRequestMode) ====="))
@@ -181,205 +249,158 @@ func executeTwoRequestMode(c *gin.Context, params *TwoRequestParams, prechargeRe
 	common.SysLog(fmt.Sprintf("[CustomPass-Usage-Debug] 实际输入tokens: %d", prechargeResp.Usage.GetInputTokens()))
 	common.SysLog(fmt.Sprintf("[CustomPass-Usage-Debug] 实际输出tokens: %d", prechargeResp.Usage.GetOutputTokens()))
 	common.SysLog(fmt.Sprintf("[CustomPass-Usage-Debug] ================================================"))
+	
+	
+	// 计算预扣费金额，使用标准ModelPriceHelper的结果                                                                          
+	var prechargeAmount int64 = 0                                                                                  
+	var finalUsage *Usage = prechargeResp.Usage                                                                    
+                                                                                                                
+	// 只有非免费的计费模式才需要计算预扣费
+	if billingMode != service.BillingModeFree {
+		// 直接使用ModelPriceHelper计算的预消费配额
+		prechargeAmount = int64(priceData.ShouldPreConsumedQuota)
+		
+		common.SysLog(fmt.Sprintf("[CustomPass-TwoRequest-Debug] ===== 预扣费计算 ====="))                         
+		common.SysLog(fmt.Sprintf("[CustomPass-TwoRequest-Debug] 计费模式: %s", billingInfo.BillingMode))          
+		common.SysLog(fmt.Sprintf("[CustomPass-TwoRequest-Debug] 组倍率: %.6f", billingInfo.GroupRatio))                       
+		common.SysLog(fmt.Sprintf("[CustomPass-TwoRequest-Debug] 用户倍率: %.6f", billingInfo.UserGroupRatio))             
+		common.SysLog(fmt.Sprintf("[CustomPass-TwoRequest-Debug] 使用标准ModelPriceHelper计算得出预扣费金额: %d (￥%.4f)",                 
+			prechargeAmount, float64(prechargeAmount)/common.QuotaPerUnit))                                        
+		common.SysLog(fmt.Sprintf("[CustomPass-TwoRequest-Debug] ===================="))
+	} else {
+		common.SysLog("[CustomPass-TwoRequest-Debug] 免费模型(BillingModeFree)，无需计算预扣费")
+	}                           
 
-	// Step 2: Send real request first to get actual usage
-	common.SysLog("[CustomPass-TwoRequest-Debug] 开始发起真实请求以获取实际usage")
+
+	// 使用prechargeResp的信息构建 返回参数
+	result = &TwoRequestResult{                                   
+		Response:        prechargeResp,                           
+		PrechargeAmount: prechargeAmount,                         
+		RequestCount:    1,                                       
+		PrechargeUsage:  finalUsage,                              
+		BillingInfo:     billingInfo,                             
+	} 
+	
+
+	// 执行预扣费（只有金额大于0才执行）
+	if prechargeAmount > 0 {
+		serviceUsageForPrecharge := &service.Usage{
+			PromptTokens:     prechargeResp.Usage.PromptTokens,
+			CompletionTokens: prechargeResp.Usage.CompletionTokens,
+			TotalTokens:      prechargeResp.Usage.TotalTokens,
+			InputTokens:      prechargeResp.Usage.InputTokens,
+			OutputTokens:     prechargeResp.Usage.OutputTokens,
+		}
+		
+		prechargeResult, _, err := params.PrechargeService.ExecutePrecharge(c, params.User, params.ModelName, serviceUsageForPrecharge)
+		if err != nil {
+			return nil, &CustomPassError{
+				Code:    ErrCodeInsufficientQuota,
+				Message: "预扣费执行失败",
+				Details: err.Error(),
+			}
+		}
+		// 使用实际扣除的金额
+		prechargeAmount = prechargeResult.PrechargeAmount
+		common.SysLog(fmt.Sprintf("[CustomPass-TwoRequest-Debug] 预扣费执行成功，实际扣除: %d (￥%.4f)", 
+			prechargeAmount, float64(prechargeAmount)/common.QuotaPerUnit))
+	}
+
+	// Check if upstream returned precharge response
+	
+	common.SysLog(fmt.Sprintf("[CustomPass-TwoRequest-Debug] 检查上游响应类型 - Type: %s, IsPrecharge: %t", 
+		prechargeResp.Type, prechargeResp.IsPrecharge()))
+
+	// 如果需要进行第二次业务请求，将业务请求的结果返回出去
+	if prechargeResp.IsPrecharge() {
+		common.SysLog("[CustomPass-TwoRequest-Debug] 上游支持预扣费，将发起两次请求")
+
+		realResp, err := executeSecondBizRequest(c, params, prechargeResp)                    
+        if err != nil {                                                                     
+            common.SysError(fmt.Sprintf("[CustomPass-TwoRequest-Debug] 二次请求失败: %v", err))
+            // 记录错误信息到logs
+            model.RecordConsumeLog(c, params.User.Id, model.RecordConsumeLogParams{
+				ChannelId:        params.Channel.Id,
+				PromptTokens:     0,
+				CompletionTokens: 0,
+				ModelName:        params.ModelName,
+				TokenName:        c.GetString("token_name"),
+				Quota:            int(prechargeAmount),
+				Content:          "二次请求失败: " + err.Error(),
+			})
+            
+            // 退还预扣费
+            if prechargeAmount > 0 {
+                common.SysLog(fmt.Sprintf("[CustomPass-TwoRequest-Debug] 退还预扣费: %d", prechargeAmount))
+                params.PrechargeService.ProcessRefund(params.User.Id, prechargeAmount, 0)
+            }
+			return nil, err                                                                 
+        } 
+
+		// 使用真实响应的usage（如果有）
+		if realResp.Usage != nil {
+			finalUsage = realResp.Usage
+			common.SysLog("[CustomPass-TwoRequest-Debug] 使用真实响应的usage作为最终usage")
+		}
+
+		// 构建返回结果                                               
+		result.Response = realResp
+		result.RequestCount = 2
+	} 
+                                                                                                                                                                                                                                                    
+    // 返回结果                                                       
+    return result, nil   
+
+}
+
+// executeSecondBizRequest handles the second business request
+// 只负责发送第二次业务请求和校验响应
+func executeSecondBizRequest(c *gin.Context, params *TwoRequestParams, prechargeResp *UpstreamResponse) (*UpstreamResponse, error) {
+	// Log the usage from precharge response for debugging
+	common.SysLog(fmt.Sprintf("[CustomPass-SecondBizRequest-Debug] ===== 开始第二次业务请求 ====="))
+	if prechargeResp.Usage != nil {
+		common.SysLog(fmt.Sprintf("[CustomPass-SecondBizRequest-Debug] 预扣费响应usage - 输入: %d, 输出: %d", 
+			prechargeResp.Usage.GetInputTokens(), prechargeResp.Usage.GetOutputTokens()))
+	}
+
+	// Send business request
+	common.SysLog("[CustomPass-SecondBizRequest-Debug] 发起真实业务请求")
+	common.SysLog(fmt.Sprintf("[CustomPass-SecondBizRequest-Debug] 第二次请求上游接口 - URL: %s", buildUpstreamURL(params.Channel.GetBaseURL(), params.ModelName)))
 	realResp, err := makeUpstreamRequest(c, params.Channel, "POST", 
 		buildUpstreamURL(params.Channel.GetBaseURL(), params.ModelName), 
 		params.RequestBody, params.AuthService, params.HTTPClient)
 	if err != nil {
-		common.SysError(fmt.Sprintf("[CustomPass-TwoRequest-Debug] 真实请求失败: %v", err))
+		common.SysError(fmt.Sprintf("[CustomPass-SecondBizRequest-Debug] 业务请求失败: %v", err))
 		return nil, err
 	}
 
-	common.SysLog("[CustomPass-TwoRequest-Debug] 真实请求成功")
-	
-	// Determine which usage to use for precharge: prefer real response usage, fallback to precharge usage
-	var finalUsage *Usage
-	var serviceUsageForPrecharge *service.Usage
-	
-	if realResp.Usage != nil {
-		// Use usage from real response if available
-		finalUsage = realResp.Usage
-		serviceUsageForPrecharge = &service.Usage{
-			PromptTokens:     realResp.Usage.PromptTokens,
-			CompletionTokens: realResp.Usage.CompletionTokens,
-			TotalTokens:      realResp.Usage.TotalTokens,
-			InputTokens:      realResp.Usage.InputTokens,
-			OutputTokens:     realResp.Usage.OutputTokens,
-		}
-		common.SysLog(fmt.Sprintf("[CustomPass-Usage-Debug] ===== 使用真实请求的Usage进行预扣费 ====="))
-		common.SysLog(fmt.Sprintf("[CustomPass-Usage-Debug] 真实请求usage - 输入: %d, 输出: %d, 总计: %d", 
-			realResp.Usage.GetInputTokens(), realResp.Usage.GetOutputTokens(), 
-			realResp.Usage.GetInputTokens() + realResp.Usage.GetOutputTokens()))
-		if prechargeResp.Usage != nil {
-			common.SysLog(fmt.Sprintf("[CustomPass-Usage-Debug] 预扣费请求usage(仅供参考) - 输入: %d, 输出: %d, 总计: %d", 
-				prechargeResp.Usage.GetInputTokens(), prechargeResp.Usage.GetOutputTokens(),
-				prechargeResp.Usage.GetInputTokens() + prechargeResp.Usage.GetOutputTokens()))
-			common.SysLog(fmt.Sprintf("[CustomPass-Usage-Debug] 差异 - 输入tokens差: %d, 输出tokens差: %d", 
-				realResp.Usage.GetInputTokens() - prechargeResp.Usage.GetInputTokens(),
-				realResp.Usage.GetOutputTokens() - prechargeResp.Usage.GetOutputTokens()))
-		}
-		common.SysLog(fmt.Sprintf("[CustomPass-Usage-Debug] ================================================"))
-	} else {
-		// Fallback to precharge usage if real response doesn't have usage
-		finalUsage = prechargeResp.Usage
-		serviceUsageForPrecharge = &service.Usage{
-			PromptTokens:     prechargeResp.Usage.PromptTokens,
-			CompletionTokens: prechargeResp.Usage.CompletionTokens,
-			TotalTokens:      prechargeResp.Usage.TotalTokens,
-			InputTokens:      prechargeResp.Usage.InputTokens,
-			OutputTokens:     prechargeResp.Usage.OutputTokens,
-		}
-		common.SysLog(fmt.Sprintf("[CustomPass-Usage-Debug] ===== 真实请求无Usage，使用预扣费请求的Usage ====="))
-		if prechargeResp.Usage != nil {
-			common.SysLog(fmt.Sprintf("[CustomPass-Usage-Debug] 预扣费请求usage - 输入: %d, 输出: %d, 总计: %d", 
-				prechargeResp.Usage.GetInputTokens(), prechargeResp.Usage.GetOutputTokens(),
-				prechargeResp.Usage.GetInputTokens() + prechargeResp.Usage.GetOutputTokens()))
-		}
-		common.SysLog(fmt.Sprintf("[CustomPass-Usage-Debug] ================================================"))
-	}
-
-	// Execute precharge using the final usage (real usage if available, otherwise precharge usage)
-	prechargeResult, billingInfo, err := params.PrechargeService.ExecutePrecharge(c, params.User, params.ModelName, serviceUsageForPrecharge)
-	if err != nil {
-		return nil, &CustomPassError{
-			Code:    ErrCodeInsufficientQuota,
-			Message: "预扣费失败",
-			Details: err.Error(),
-		}
-	}
-	prechargeAmount := prechargeResult.PrechargeAmount
-	common.SysLog(fmt.Sprintf("[CustomPass-TwoRequest-Debug] 基于最终usage的预扣费成功(金额: %d)", prechargeAmount))
-	
-	// Check if real request was successful
+	// 校验响应是否成功
 	if !realResp.IsSuccess() {
-		// Refund precharge amount on failed real request
-		if prechargeAmount > 0 {
-			common.SysLog(fmt.Sprintf("[CustomPass-TwoRequest-Debug] 真实请求响应失败，退还预扣费: %d", prechargeAmount))
-			params.PrechargeService.ProcessRefund(params.User.Id, prechargeAmount, 0)
-		}
 		return nil, &CustomPassError{
 			Code:    ErrCodeUpstreamError,
-			Message: "上游请求失败",
+			Message: "上游业务请求失败",
 			Details: realResp.GetMessage(),
 		}
 	}
+
+	common.SysLog("[CustomPass-SecondBizRequest-Debug] 业务请求成功")
 	
-	return &TwoRequestResult{
-		Response:        realResp,
-		PrechargeAmount: prechargeAmount, // Now based on final usage
-		RequestCount:    2,
-		PrechargeUsage:  finalUsage, // Use final usage for consistent billing
-		BillingInfo:     billingInfo, // Include billing context
-	}, nil
-}
-
-// executeSingleRequestMode handles the case where upstream doesn't support precharge
-func executeSingleRequestMode(c *gin.Context, params *TwoRequestParams, prechargeResp *UpstreamResponse) (*TwoRequestResult, error) {
-	// For single request mode, we need to validate that the response contains usage information
-	// for models that require usage-based billing
-	billingMode := params.BillingService.DetermineBillingMode(params.ModelName)
-	
-	if billingMode == service.BillingModeUsage {
-		// For usage-based billing, the response must contain usage information
-		if prechargeResp.Usage == nil {
-			common.SysError(fmt.Sprintf("[CustomPass-TwoRequest-Debug] 按量计费模型%s的响应缺少usage信息", params.ModelName))
-			return nil, &CustomPassError{
-				Code:    ErrCodeUpstreamError,
-				Message: fmt.Sprintf("按量计费模型%s的响应必须包含usage信息", params.ModelName),
-			}
-		}
-
-		// Convert Usage to service.Usage for validation
-		serviceUsageForValidation := &service.Usage{
-			PromptTokens:     prechargeResp.Usage.PromptTokens,
-			CompletionTokens: prechargeResp.Usage.CompletionTokens,
-			TotalTokens:      prechargeResp.Usage.TotalTokens,
-			InputTokens:      prechargeResp.Usage.InputTokens,
-			OutputTokens:     prechargeResp.Usage.OutputTokens,
-		}
-		
-		// Validate usage for billing
-		if err := params.BillingService.ValidateUsageForBilling(params.ModelName, serviceUsageForValidation); err != nil {
-			common.SysError(fmt.Sprintf("[CustomPass-TwoRequest-Debug] 按量计费模型%s的usage信息校验失败: %v", params.ModelName, err))
-			return nil, &CustomPassError{
-				Code:    ErrCodeUpstreamError,
-				Message: fmt.Sprintf("按量计费模型%s的usage信息无效: %s", params.ModelName, err.Error()),
-			}
-		}
-
-		// Use actual usage from response for precharge calculation
-		serviceUsage := &service.Usage{
-			PromptTokens:     prechargeResp.Usage.PromptTokens,
-			CompletionTokens: prechargeResp.Usage.CompletionTokens,
-			TotalTokens:      prechargeResp.Usage.TotalTokens,
-			InputTokens:      prechargeResp.Usage.InputTokens,
-			OutputTokens:     prechargeResp.Usage.OutputTokens,
-		}
-
-		common.SysLog(fmt.Sprintf("[CustomPass-TwoRequest-Debug] 使用响应中的实际用量进行预扣费 - PromptTokens: %d, CompletionTokens: %d", 
-			serviceUsage.PromptTokens, serviceUsage.CompletionTokens))
-
-		// Execute precharge with actual usage from response
-		prechargeResult, billingInfo, err := params.PrechargeService.ExecutePrecharge(c, params.User, params.ModelName, serviceUsage)
-		if err != nil {
-			common.SysError(fmt.Sprintf("[CustomPass-TwoRequest-Debug] 实际用量预扣费失败: %v", err))
-			return nil, &CustomPassError{
-				Code:    ErrCodeInsufficientQuota,
-				Message: "预扣费失败",
-				Details: err.Error(),
-			}
-		}
-		prechargeAmount := prechargeResult.PrechargeAmount
-
-		common.SysLog(fmt.Sprintf("[CustomPass-TwoRequest-Debug] 实际用量预扣费成功(金额: %d)，直接使用第一次请求的响应", prechargeAmount))
-		return &TwoRequestResult{
-			Response:        prechargeResp,
-			PrechargeAmount: prechargeAmount,
-			RequestCount:    1,
-			PrechargeUsage:  prechargeResp.Usage, // Use usage from precharge response (same as response in single request mode)
-			BillingInfo:     billingInfo, // Include billing context
-		}, nil
-	} else {
-		// For fixed-price or free models, usage is not required
-		var prechargeAmount int64 = 0
-		var billingInfo *model.BillingInfo = nil
-		var prechargeResult *service.PrechargeResult
-		var err error
-		
-		if billingMode == service.BillingModeFixed {
-			// For fixed-price models, calculate based on fixed price
-			estimatedUsage := &service.Usage{
-				PromptTokens:     1, // Minimal usage for fixed price calculation
-				CompletionTokens: 1,
-				TotalTokens:      2,
-			}
-
-			prechargeResult, billingInfo, err = params.PrechargeService.ExecutePrecharge(c, params.User, params.ModelName, estimatedUsage)
-			if err != nil {
-				common.SysError(fmt.Sprintf("[CustomPass-TwoRequest-Debug] 固定价格模型预扣费失败: %v", err))
-				return nil, &CustomPassError{
-					Code:    ErrCodeInsufficientQuota,
-					Message: "预扣费失败",
-					Details: err.Error(),
-				}
-			}
-			prechargeAmount = prechargeResult.PrechargeAmount
-			common.SysLog(fmt.Sprintf("[CustomPass-TwoRequest-Debug] 固定价格模型预扣费成功(金额: %d)", prechargeAmount))
-		} else {
-			common.SysLog("[CustomPass-TwoRequest-Debug] 免费模型，无需预扣费")
-		}
-
-		return &TwoRequestResult{
-			Response:        prechargeResp,
-			PrechargeAmount: prechargeAmount,
-			RequestCount:    1,
-			PrechargeUsage:  prechargeResp.Usage, // Use usage from precharge response (may be nil for free models)
-			BillingInfo:     billingInfo, // Include billing context (may be nil for free models)
-		}, nil
+	// Log usage comparison if available
+	if realResp.Usage != nil && prechargeResp.Usage != nil {
+		common.SysLog(fmt.Sprintf("[CustomPass-SecondBizRequest-Debug] Usage对比:"))
+		common.SysLog(fmt.Sprintf("[CustomPass-SecondBizRequest-Debug] 真实usage - 输入: %d, 输出: %d", 
+			realResp.Usage.GetInputTokens(), realResp.Usage.GetOutputTokens()))
+		common.SysLog(fmt.Sprintf("[CustomPass-SecondBizRequest-Debug] 预扣费usage - 输入: %d, 输出: %d", 
+			prechargeResp.Usage.GetInputTokens(), prechargeResp.Usage.GetOutputTokens()))
+		common.SysLog(fmt.Sprintf("[CustomPass-SecondBizRequest-Debug] 差异 - 输入: %d, 输出: %d", 
+			realResp.Usage.GetInputTokens() - prechargeResp.Usage.GetInputTokens(),
+			realResp.Usage.GetOutputTokens() - prechargeResp.Usage.GetOutputTokens()))
 	}
+	common.SysLog(fmt.Sprintf("[CustomPass-SecondBizRequest-Debug] ===== 第二次业务请求完成 ====="))
+
+	return realResp, nil
 }
+
 
 // handlePrechargeRequest handles the precharge request to upstream
 func handlePrechargeRequest(c *gin.Context, params *TwoRequestParams) (*UpstreamResponse, error) {
@@ -526,4 +547,16 @@ func checkModelBilling(modelName string) (bool, error) {
 
 	// If model not found in ability table, treat as free model
 	return abilityCount > 0, nil
+}
+
+// billingModeToString converts BillingMode to string
+func billingModeToString(mode service.BillingMode) string {
+	switch mode {
+	case service.BillingModeUsage:
+		return "usage"
+	case service.BillingModeFixed:
+		return "fixed"
+	default:
+		return "free"
+	}
 }
