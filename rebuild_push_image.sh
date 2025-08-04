@@ -414,15 +414,81 @@ cleanup_old_images() {
     log_success "清理完成"
 }
 
+# 选择 Dockerfile
+select_dockerfile() {
+    log_info "选择 Dockerfile..."
+    
+    # 查找所有以 Dockerfile 开头的文件
+    local dockerfiles=($(find . -maxdepth 1 -name "Dockerfile*" -type f | sort))
+    
+    if [ ${#dockerfiles[@]} -eq 0 ]; then
+        log_error "未找到任何 Dockerfile 文件"
+        exit 1
+    fi
+    
+    if [ ${#dockerfiles[@]} -eq 1 ]; then
+        DOCKERFILE="${dockerfiles[0]}"
+        log_info "只找到一个 Dockerfile: $DOCKERFILE"
+        return 0
+    fi
+    
+    echo ""
+    echo "找到多个 Dockerfile 文件，请选择："
+    echo "=================================="
+    
+    for i in "${!dockerfiles[@]}"; do
+        local file="${dockerfiles[$i]}"
+        local filename=$(basename "$file")
+        echo "  $((i+1)) - $filename"
+        
+        # 获取预定义的描述
+        local description=""
+        case "$filename" in
+            "Dockerfile")
+                description="默认全功能Docker镜像 - 包含前端和后端"
+                ;;
+            *)
+                # 其他Dockerfile文件从文件中读取描述
+                description=$(head -n 5 "$file" | grep -E "^#.*" | head -n 1 | sed 's/^# *//')
+                ;;
+        esac
+        
+        if [ -n "$description" ]; then
+            echo "      描述: $description"
+        fi
+    done
+    
+    echo ""
+    
+    while true; do
+        read -p "请选择 Dockerfile (1-${#dockerfiles[@]}): " choice
+        
+        if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le ${#dockerfiles[@]} ]; then
+            DOCKERFILE="${dockerfiles[$((choice-1))]}"
+            log_success "选择了 Dockerfile: $(basename $DOCKERFILE)"
+            break
+        else
+            log_error "请输入有效的数字 (1-${#dockerfiles[@]})"
+        fi
+    done
+    
+    echo ""
+}
+
 # 构建新镜像
 build_image() {
     log_info "开始构建新镜像..."
 
-    # 检查 Dockerfile 是否存在
-    if [ ! -f "Dockerfile" ]; then
-        log_error "Dockerfile 不存在"
+    # 选择 Dockerfile
+    select_dockerfile
+    
+    # 检查选择的 Dockerfile 是否存在
+    if [ ! -f "$DOCKERFILE" ]; then
+        log_error "选择的 Dockerfile 不存在: $DOCKERFILE"
         exit 1
     fi
+    
+    log_info "使用 Dockerfile: $(basename $DOCKERFILE)"
 
     # 检查是否需要创建 buildx builder
     if [ "$MULTI_PLATFORM" = true ] || [ "$PLATFORM" != "$(docker version --format '{{.Server.Os}}/{{.Server.Arch}}')" ]; then
@@ -458,6 +524,7 @@ build_image() {
             --tag "$latest_tag" \
             --push \
             --no-cache \
+            -f "$DOCKERFILE" \
             .; then
             log_success "多平台镜像构建并推送成功 (版本: $VERSION)"
             MULTI_PLATFORM_PUSHED=true
@@ -472,6 +539,7 @@ build_image() {
             --tag "new-api:$VERSION" \
             --load \
             --no-cache \
+            -f "$DOCKERFILE" \
             .; then
             # 同时创建 local 标签
             docker tag new-api:$VERSION new-api:local
