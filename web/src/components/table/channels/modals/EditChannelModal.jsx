@@ -47,6 +47,8 @@ import {
   Highlight,
 } from '@douyinfe/semi-ui';
 import { getChannelModels, copy, getChannelIcon, getModelCategories, selectFilter } from '../../../../helpers';
+import ModelSelectModal from './ModelSelectModal';
+import JSONEditor from '../../../common/JSONEditor';
 import {
   IconSave,
   IconClose,
@@ -68,7 +70,9 @@ const STATUS_CODE_MAPPING_EXAMPLE = {
 };
 
 const REGION_EXAMPLE = {
-  default: 'us-central1',
+  "default": 'global',
+  "gemini-1.5-pro-002": "europe-west2",
+  "gemini-1.5-flash-002": "europe-west2",
   'claude-3-5-sonnet-20240620': 'europe-west1',
 };
 
@@ -141,6 +145,8 @@ const EditChannelModal = (props) => {
   const [customModel, setCustomModel] = useState('');
   const [modalImageUrl, setModalImageUrl] = useState('');
   const [isModalOpenurl, setIsModalOpenurl] = useState(false);
+  const [modelModalVisible, setModelModalVisible] = useState(false);
+  const [fetchedModels, setFetchedModels] = useState([]);
   const formApiRef = useRef(null);
   const [vertexKeys, setVertexKeys] = useState([]);
   const [vertexFileList, setVertexFileList] = useState([]);
@@ -148,6 +154,7 @@ const EditChannelModal = (props) => {
   const [isMultiKeyChannel, setIsMultiKeyChannel] = useState(false);
   const [channelSearchValue, setChannelSearchValue] = useState('');
   const [useManualInput, setUseManualInput] = useState(false); // 是否使用手动输入模式
+  const [keyMode, setKeyMode] = useState('append'); // 密钥模式：replace（覆盖）或 append（追加）
   // 渠道额外设置状态
   const [channelSettings, setChannelSettings] = useState({
     force_format: false,
@@ -378,7 +385,7 @@ const EditChannelModal = (props) => {
     //   return;
     // }
     setLoading(true);
-    const models = inputs['models'] || [];
+    const models = [];
     let err = false;
 
     if (isEdit) {
@@ -419,8 +426,9 @@ const EditChannelModal = (props) => {
     }
 
     if (!err) {
-      handleInputChange(name, Array.from(new Set(models)));
-      showSuccess(t('获取模型列表成功'));
+      const uniqueModels = Array.from(new Set(models));
+      setFetchedModels(uniqueModels);
+      setModelModalVisible(true);
     } else {
       showError(t('获取模型列表失败'));
     }
@@ -553,6 +561,12 @@ const EditChannelModal = (props) => {
         pass_through_body_enabled: false,
         system_prompt: '',
       });
+      // 重置密钥模式状态
+      setKeyMode('append');
+      // 清空表单中的key_mode字段
+      if (formApiRef.current) {
+        formApiRef.current.setValue('key_mode', undefined);
+      }
     }
   }, [props.visible, channelId]);
 
@@ -718,6 +732,7 @@ const EditChannelModal = (props) => {
       res = await API.put(`/api/channel/`, {
         ...localInputs,
         id: parseInt(channelId),
+        key_mode: isMultiKeyChannel ? keyMode : undefined, // 只在多key模式下传递
       });
     } else {
       res = await API.post(`/api/channel/`, {
@@ -780,55 +795,59 @@ const EditChannelModal = (props) => {
   const batchAllowed = !isEdit || isMultiKeyChannel;
   const batchExtra = batchAllowed ? (
     <Space>
-      <Checkbox
-        disabled={isEdit}
-        checked={batch}
-        onChange={(e) => {
-          const checked = e.target.checked;
+      {!isEdit && (
+        <Checkbox
+          disabled={isEdit}
+          checked={batch}
+          onChange={(e) => {
+            const checked = e.target.checked;
 
-          if (!checked && vertexFileList.length > 1) {
-            Modal.confirm({
-              title: t('切换为单密钥模式'),
-              content: t('将仅保留第一个密钥文件，其余文件将被移除，是否继续？'),
-              onOk: () => {
-                const firstFile = vertexFileList[0];
-                const firstKey = vertexKeys[0] ? [vertexKeys[0]] : [];
+            if (!checked && vertexFileList.length > 1) {
+              Modal.confirm({
+                title: t('切换为单密钥模式'),
+                content: t('将仅保留第一个密钥文件，其余文件将被移除，是否继续？'),
+                onOk: () => {
+                  const firstFile = vertexFileList[0];
+                  const firstKey = vertexKeys[0] ? [vertexKeys[0]] : [];
 
-                setVertexFileList([firstFile]);
-                setVertexKeys(firstKey);
+                  setVertexFileList([firstFile]);
+                  setVertexKeys(firstKey);
 
-                formApiRef.current?.setValue('vertex_files', [firstFile]);
-                setInputs((prev) => ({ ...prev, vertex_files: [firstFile] }));
+                  formApiRef.current?.setValue('vertex_files', [firstFile]);
+                  setInputs((prev) => ({ ...prev, vertex_files: [firstFile] }));
 
-                setBatch(false);
-                setMultiToSingle(false);
-                setMultiKeyMode('random');
-              },
-              onCancel: () => {
-                setBatch(true);
-              },
-              centered: true,
-            });
-            return;
-          }
-
-          setBatch(checked);
-          if (!checked) {
-            setMultiToSingle(false);
-            setMultiKeyMode('random');
-          } else {
-            // 批量模式下禁用手动输入，并清空手动输入的内容
-            setUseManualInput(false);
-            if (inputs.type === 41) {
-              // 清空手动输入的密钥内容
-              if (formApiRef.current) {
-                formApiRef.current.setValue('key', '');
-              }
-              handleInputChange('key', '');
+                  setBatch(false);
+                  setMultiToSingle(false);
+                  setMultiKeyMode('random');
+                },
+                onCancel: () => {
+                  setBatch(true);
+                },
+                centered: true,
+              });
+              return;
             }
-          }
-        }}
-      >{t('批量创建')}</Checkbox>
+
+            setBatch(checked);
+            if (!checked) {
+              setMultiToSingle(false);
+              setMultiKeyMode('random');
+            } else {
+              // 批量模式下禁用手动输入，并清空手动输入的内容
+              setUseManualInput(false);
+              if (inputs.type === 41) {
+                // 清空手动输入的密钥内容
+                if (formApiRef.current) {
+                  formApiRef.current.setValue('key', '');
+                }
+                handleInputChange('key', '');
+              }
+            }
+          }}
+        >
+          {t('批量创建')}
+        </Checkbox>
+      )}
       {batch && (
         <Checkbox disabled={isEdit} checked={multiToSingle} onChange={() => {
           setMultiToSingle(prev => !prev);
@@ -1025,7 +1044,16 @@ const EditChannelModal = (props) => {
                         autosize
                         autoComplete='new-password'
                         onChange={(value) => handleInputChange('key', value)}
-                        extraText={batchExtra}
+                        extraText={
+                          <div className="flex items-center gap-2">
+                            {isEdit && isMultiKeyChannel && keyMode === 'append' && (
+                              <Text type="warning" size="small">
+                                {t('追加模式：新密钥将添加到现有密钥列表的末尾')}
+                              </Text>
+                            )}
+                            {batchExtra}
+                          </div>
+                        }
                         showClear
                       />
                     )
@@ -1092,6 +1120,11 @@ const EditChannelModal = (props) => {
                                   <Text type="tertiary" size="small">
                                     {t('请输入完整的 JSON 格式密钥内容')}
                                   </Text>
+                                  {isEdit && isMultiKeyChannel && keyMode === 'append' && (
+                                    <Text type="warning" size="small">
+                                      {t('追加模式：新密钥将添加到现有密钥列表的末尾')}
+                                    </Text>
+                                  )}
                                   {batchExtra}
                                 </div>
                               }
@@ -1125,13 +1158,44 @@ const EditChannelModal = (props) => {
                           rules={isEdit ? [] : [{ required: true, message: t('请输入密钥') }]}
                           autoComplete='new-password'
                           onChange={(value) => handleInputChange('key', value)}
-                          extraText={batchExtra}
+                          extraText={
+                            <div className="flex items-center gap-2">
+                              {isEdit && isMultiKeyChannel && keyMode === 'append' && (
+                                <Text type="warning" size="small">
+                                  {t('追加模式：新密钥将添加到现有密钥列表的末尾')}
+                                </Text>
+                              )}
+                              {batchExtra}
+                            </div>
+                          }
                           showClear
                         />
                       )}
                     </>
                   )}
 
+                {isEdit && isMultiKeyChannel && (
+                        <Form.Select
+                          field='key_mode'
+                          label={t('密钥更新模式')}
+                          placeholder={t('请选择密钥更新模式')}
+                          optionList={[
+                            { label: t('追加到现有密钥'), value: 'append' },
+                            { label: t('覆盖现有密钥'), value: 'replace' },
+                          ]}
+                          style={{ width: '100%' }}
+                          value={keyMode}
+                          onChange={(value) => setKeyMode(value)}
+                          extraText={
+                            <Text type="tertiary" size="small">
+                              {keyMode === 'replace' 
+                                ? t('覆盖模式：将完全替换现有的所有密钥') 
+                                : t('追加模式：将新密钥添加到现有密钥列表末尾')
+                              }
+                            </Text>
+                          }
+                        />
+                  )}
                   {batch && multiToSingle && (
                     <>
                       <Form.Select
@@ -1170,24 +1234,24 @@ const EditChannelModal = (props) => {
                   )}
 
                   {inputs.type === 41 && (
-                    <Form.TextArea
+                    <JSONEditor
                       field='other'
                       label={t('部署地区')}
                       placeholder={t(
                         '请输入部署地区，例如：us-central1\n支持使用模型映射格式\n{\n    "default": "us-central1",\n    "claude-3-5-sonnet-20240620": "europe-west1"\n}'
                       )}
-                      autosize
+                      value={inputs.other || ''}
                       onChange={(value) => handleInputChange('other', value)}
                       rules={[{ required: true, message: t('请填写部署地区') }]}
+                      template={REGION_EXAMPLE}
+                      templateLabel={t('填入模板')}
+                      editorType="region"
+                      formApi={formApiRef.current}
                       extraText={
-                        <Text
-                          className="!text-semi-color-primary cursor-pointer"
-                          onClick={() => handleInputChange('other', JSON.stringify(REGION_EXAMPLE, null, 2))}
-                        >
-                          {t('填入模板')}
+                        <Text type="tertiary" size="small">
+                          {t('设置默认地区和特定模型的专用地区')}
                         </Text>
                       }
-                      showClear
                     />
                   )}
 
@@ -1504,24 +1568,24 @@ const EditChannelModal = (props) => {
                     showClear
                   />
 
-                  <Form.TextArea
+                  <JSONEditor
                     field='model_mapping'
                     label={t('模型重定向')}
                     placeholder={
                       t('此项可选，用于修改请求体中的模型名称，为一个 JSON 字符串，键为请求中模型名称，值为要替换的模型名称，例如：') +
                       `\n${JSON.stringify(MODEL_MAPPING_EXAMPLE, null, 2)}`
                     }
-                    autosize
+                    value={inputs.model_mapping || ''}
                     onChange={(value) => handleInputChange('model_mapping', value)}
+                    template={MODEL_MAPPING_EXAMPLE}
+                    templateLabel={t('填入模板')}
+                    editorType="keyValue"
+                    formApi={formApiRef.current}
                     extraText={
-                      <Text
-                        className="!text-semi-color-primary cursor-pointer"
-                        onClick={() => handleInputChange('model_mapping', JSON.stringify(MODEL_MAPPING_EXAMPLE, null, 2))}
-                      >
-                        {t('填入模板')}
+                      <Text type="tertiary" size="small">
+                        {t('键为请求中的模型名称，值为要替换的模型名称')}
                       </Text>
                     }
-                    showClear
                   />
 
                   {inputs.type === 53 && (
@@ -1630,7 +1694,7 @@ const EditChannelModal = (props) => {
                     showClear
                   />
 
-                  <Form.TextArea
+                  <JSONEditor
                     field='status_code_mapping'
                     label={t('状态码复写')}
                     placeholder={
@@ -1638,17 +1702,17 @@ const EditChannelModal = (props) => {
                       '\n' +
                       JSON.stringify(STATUS_CODE_MAPPING_EXAMPLE, null, 2)
                     }
-                    autosize
+                    value={inputs.status_code_mapping || ''}
                     onChange={(value) => handleInputChange('status_code_mapping', value)}
+                    template={STATUS_CODE_MAPPING_EXAMPLE}
+                    templateLabel={t('填入模板')}
+                    editorType="keyValue"
+                    formApi={formApiRef.current}
                     extraText={
-                      <Text
-                        className="!text-semi-color-primary cursor-pointer"
-                        onClick={() => handleInputChange('status_code_mapping', JSON.stringify(STATUS_CODE_MAPPING_EXAMPLE, null, 2))}
-                      >
-                        {t('填入模板')}
+                      <Text type="tertiary" size="small">
+                        {t('键为原状态码，值为要复写的状态码，仅影响本地判断')}
                       </Text>
                     }
-                    showClear
                   />
                 </Card>
 
@@ -1661,14 +1725,6 @@ const EditChannelModal = (props) => {
                     </Avatar>
                     <div>
                       <Text className="text-lg font-medium">{t('渠道额外设置')}</Text>
-                      <div className="text-xs text-gray-600">
-                        <Text
-                          className="!text-semi-color-primary cursor-pointer"
-                          onClick={() => window.open('https://github.com/QuantumNous/new-api/blob/main/docs/channel/other_setting.md')}
-                        >
-                          {t('设置说明')}
-                        </Text>
-                      </div>
                     </div>
                   </div>
 
@@ -1730,6 +1786,17 @@ const EditChannelModal = (props) => {
           onVisibleChange={(visible) => setIsModalOpenurl(visible)}
         />
       </SideSheet>
+      <ModelSelectModal
+        visible={modelModalVisible}
+        models={fetchedModels}
+        selected={inputs.models}
+        onConfirm={(selectedModels) => {
+          handleInputChange('models', selectedModels);
+          showSuccess(t('模型列表已更新'));
+          setModelModalVisible(false);
+        }}
+        onCancel={() => setModelModalVisible(false)}
+      />
     </>
   );
 };

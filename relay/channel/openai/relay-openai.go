@@ -109,7 +109,7 @@ func sendStreamData(c *gin.Context, info *relaycommon.RelayInfo, data string, fo
 func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response) (*dto.Usage, *types.NewAPIError) {
 	if resp == nil || resp.Body == nil {
 		common.LogError(c, "invalid response or response body")
-		return nil, types.NewError(fmt.Errorf("invalid response"), types.ErrorCodeBadResponse)
+		return nil, types.NewOpenAIError(fmt.Errorf("invalid response"), types.ErrorCodeBadResponse, http.StatusInternalServerError)
 	}
 
 	defer common.CloseResponseBodyGracefully(resp)
@@ -178,14 +178,14 @@ func OpenaiHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Respo
 	var simpleResponse dto.OpenAITextResponse
 	responseBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, types.NewError(err, types.ErrorCodeReadResponseBodyFailed)
+		return nil, types.NewOpenAIError(err, types.ErrorCodeReadResponseBodyFailed, http.StatusInternalServerError)
 	}
 	err = common.Unmarshal(responseBody, &simpleResponse)
 	if err != nil {
-		return nil, types.NewError(err, types.ErrorCodeBadResponseBody)
+		return nil, types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
 	}
-	if simpleResponse.Error != nil && simpleResponse.Error.Type != "" {
-		return nil, types.WithOpenAIError(*simpleResponse.Error, resp.StatusCode)
+	if oaiError := simpleResponse.GetOpenAIError(); oaiError != nil && oaiError.Type != "" {
+		return nil, types.WithOpenAIError(*oaiError, resp.StatusCode)
 	}
 
 	forceFormat := false
@@ -223,6 +223,13 @@ func OpenaiHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Respo
 			return nil, types.NewError(err, types.ErrorCodeBadResponseBody)
 		}
 		responseBody = claudeRespStr
+	case relaycommon.RelayFormatGemini:
+		geminiResp := service.ResponseOpenAI2Gemini(&simpleResponse, info)
+		geminiRespStr, err := common.Marshal(geminiResp)
+		if err != nil {
+			return nil, types.NewError(err, types.ErrorCodeBadResponseBody)
+		}
+		responseBody = geminiRespStr
 	}
 
 	common.IOCopyBytesGracefully(c, resp, responseBody)
@@ -263,7 +270,7 @@ func OpenaiSTTHandler(c *gin.Context, resp *http.Response, info *relaycommon.Rel
 	}
 	responseBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return types.NewError(err, types.ErrorCodeReadResponseBodyFailed), nil
+		return types.NewOpenAIError(err, types.ErrorCodeReadResponseBodyFailed, http.StatusInternalServerError), nil
 	}
 	// 写入新的 response body
 	common.IOCopyBytesGracefully(c, resp, responseBody)
@@ -547,13 +554,13 @@ func OpenaiHandlerWithUsage(c *gin.Context, info *relaycommon.RelayInfo, resp *h
 
 	responseBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, types.NewError(err, types.ErrorCodeReadResponseBodyFailed)
+		return nil, types.NewOpenAIError(err, types.ErrorCodeReadResponseBodyFailed, http.StatusInternalServerError)
 	}
 
 	var usageResp dto.SimpleResponse
 	err = common.Unmarshal(responseBody, &usageResp)
 	if err != nil {
-		return nil, types.NewError(err, types.ErrorCodeBadResponseBody)
+		return nil, types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
 	}
 
 	// 写入新的 response body
