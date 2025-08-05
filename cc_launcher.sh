@@ -1,10 +1,10 @@
 #!/bin/bash
 
 # Claude Code Launcher Script
-# Version: 2.2.16
+# Version: 2.2.17
 
 # 版本信息
-VERSION="2.2.16"
+VERSION="2.2.17"
 REMOTE_SCRIPT_URL="http://tfs.sthnext.com/cc/cc_launcher.sh"
 
 # 版本管理函数
@@ -138,8 +138,8 @@ update_version_in_script() {
     echo "✅ 已更新脚本版本号为: $new_version"
 }
 
-# 检查是否有 -u 参数
-if [[ "$1" == "-u" ]]; then
+# 检查是否有 --upload 参数
+if [[ "$1" == "--upload" ]]; then
     # 执行上传功能
     echo "🚀 准备上传 cc_launcher.sh 到 FTP 服务器..."
     
@@ -891,13 +891,13 @@ curl_with_loading() {
     local skip_requested=false
     
     # 隐藏光标
-    echo -ne "\033[?25l"
+    echo -ne "\033[?25l" >&2
     
     # 显示第一个loading状态和提示信息
     if [[ "$allow_skip" == "true" ]]; then
-        echo -ne "\r${BLUE}[INFO]${NC} $message ⠋ ${YELLOW}(按回车跳过，Ctrl+C退出)${NC}"
+        echo -ne "\r${BLUE}[INFO]${NC} $message ⠋ ${YELLOW}(按回车跳过，Ctrl+C退出)${NC}" >&2
     else
-        echo -ne "\r${BLUE}[INFO]${NC} $message ⠋ ${YELLOW}(Ctrl+C退出)${NC}"
+        echo -ne "\r${BLUE}[INFO]${NC} $message ⠋ ${YELLOW}(Ctrl+C退出)${NC}" >&2
     fi
     
     # 设置非阻塞读取
@@ -910,7 +910,7 @@ curl_with_loading() {
     while kill -0 "$curl_pid" 2>/dev/null && [[ "$skip_requested" == "false" ]]; do
         local spin_char=${spinner:$i:1}
         if [[ "$allow_skip" == "true" ]]; then
-            echo -ne "\r${BLUE}[INFO]${NC} $message $spin_char ${YELLOW}(按回车跳过，Ctrl+C退出)${NC}"
+            echo -ne "\r${BLUE}[INFO]${NC} $message $spin_char ${YELLOW}(按回车跳过，Ctrl+C退出)${NC}" >&2
             
             # 检查是否有按键输入
             local key=""
@@ -925,7 +925,7 @@ curl_with_loading() {
                 fi
             fi
         else
-            echo -ne "\r${BLUE}[INFO]${NC} $message $spin_char ${YELLOW}(Ctrl+C退出)${NC}"
+            echo -ne "\r${BLUE}[INFO]${NC} $message $spin_char ${YELLOW}(Ctrl+C退出)${NC}" >&2
         fi
         sleep 0.1
         i=$(( (i + 1) % ${#spinner} ))
@@ -943,8 +943,8 @@ curl_with_loading() {
     local exit_code=$?
     
     # 恢复光标并清除loading行
-    echo -ne "\033[?25h"
-    echo -ne "\r\033[K"
+    echo -ne "\033[?25h" >&2
+    echo -ne "\r\033[K" >&2
     
     # 清除信号处理
     trap - INT
@@ -1600,17 +1600,28 @@ install_nodejs() {
         # macOS/Linux - 安装nvm和Node.js
         print_info "正在安装nvm..."
         
-        # 下载并安装nvm
-        if curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash; then
+        # 下载并安装nvm（添加超时控制）
+        print_info "下载nvm安装脚本... (超时时间: 5分钟)"
+        if timeout 300 bash -c "curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash"; then
             print_success "nvm安装成功"
             
             # 加载nvm
             export NVM_DIR="$HOME/.nvm"
             [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
             
+            # 等待nvm完全加载
+            sleep 2
+            
+            # 验证nvm是否可用
+            if ! command -v nvm &> /dev/null; then
+                print_error "nvm加载失败，请重新启动终端后再试"
+                exit 1
+            fi
+            
             # 安装Node.js v22
-            print_info "正在安装Node.js v22..."
-            if nvm install 22; then
+            print_info "正在安装Node.js v22... (超时时间: 10分钟)"
+            print_info "正在下载Node.js二进制文件，请耐心等待..."
+            if timeout 600 nvm install 22; then
                 print_success "Node.js v22安装成功"
                 
                 # 验证安装
@@ -1620,11 +1631,27 @@ install_nodejs() {
                 echo "- Node.js: $node_version"
                 echo "- npm: v$npm_version"
             else
-                print_error "Node.js安装失败"
+                local exit_code=$?
+                if [[ $exit_code -eq 124 ]]; then
+                    print_error "Node.js安装超时（10分钟）"
+                    print_info "可能是网络连接较慢或下载服务器响应慢"
+                    print_info "请稍后重试或手动执行: nvm install 22"
+                else
+                    print_error "Node.js安装失败 (退出代码: $exit_code)"
+                fi
                 exit 1
             fi
         else
-            print_error "nvm安装失败"
+            local exit_code=$?
+            if [[ $exit_code -eq 124 ]]; then
+                print_error "nvm安装超时（5分钟）"
+                print_info "可能是网络连接较慢，请稍后重试或手动安装"
+            else
+                print_error "nvm安装失败 (退出代码: $exit_code)"
+            fi
+            print_info "手动安装命令："
+            echo "curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash"
+            echo "source ~/.bashrc && nvm install 22"
             exit 1
         fi
         
