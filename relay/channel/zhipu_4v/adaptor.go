@@ -10,6 +10,7 @@ import (
 	"one-api/relay/channel/openai"
 	relaycommon "one-api/relay/common"
 	relayconstant "one-api/relay/constant"
+	"one-api/service"
 	"one-api/types"
 
 	"github.com/gin-gonic/gin"
@@ -23,10 +24,19 @@ func (a *Adaptor) ConvertGeminiRequest(*gin.Context, *relaycommon.RelayInfo, *dt
 	return nil, errors.New("not implemented")
 }
 
-func (a *Adaptor) ConvertClaudeRequest(*gin.Context, *relaycommon.RelayInfo, *dto.ClaudeRequest) (any, error) {
-	//TODO implement me
-	panic("implement me")
-	return nil, nil
+func (a *Adaptor) ConvertClaudeRequest(c *gin.Context, info *relaycommon.RelayInfo, request *dto.ClaudeRequest) (any, error) {
+	if request == nil {
+		return nil, errors.New("request is nil")
+	}
+	
+	// Convert Claude request to OpenAI format using the service
+	openAIRequest, err := service.ClaudeToOpenAIRequest(*request, info)
+	if err != nil {
+		return nil, err
+	}
+	
+	// Convert OpenAI request to ZhiPu format
+	return a.ConvertOpenAIRequest(c, info, openAIRequest)
 }
 
 func (a *Adaptor) ConvertAudioRequest(c *gin.Context, info *relaycommon.RelayInfo, request dto.AudioRequest) (io.Reader, error) {
